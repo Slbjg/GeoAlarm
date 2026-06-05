@@ -1,0 +1,268 @@
+package com.example.geoalarm
+
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.media.MediaPlayer
+import android.media.RingtoneManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.widget.*
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+class MainActivity : AppCompatActivity(), LocationListener {
+    private lateinit var locationManager: LocationManager
+    private lateinit var vibrator: Vibrator
+    private lateinit var handler: Handler
+
+    private lateinit var etLatitude: EditText
+    private lateinit var etLongitude: EditText
+    private lateinit var etRadius: EditText
+    private lateinit var spinnerTrigger: Spinner
+    private lateinit var btnSetAlarm: Button
+    private lateinit var btnStopAlarm: Button
+    private lateinit var tvStatus: TextView
+    private lateinit var tvCurrentLocation: TextView
+
+    private var targetLatitude = 0.0
+    private var targetLongitude = 0.0
+    private var radius = 100.0
+    private var triggerType = 0
+    private var isAlarmActive = false
+    private var wasInside = false
+
+    private val LOCATION_PERMISSION_CODE = 100
+    private val CHANNEL_ID = "geo_alarm_channel"
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        handler = Handler()
+
+        etLatitude = findViewById(R.id.etLatitude)
+        etLongitude = findViewById(R.id.etLongitude)
+        etRadius = findViewById(R.id.etRadius)
+        spinnerTrigger = findViewById(R.id.spinnerTrigger)
+        btnSetAlarm = findViewById(R.id.btnSetAlarm)
+        btnStopAlarm = findViewById(R.id.btnStopAlarm)
+        tvStatus = findViewById(R.id.tvStatus)
+        tvCurrentLocation = findViewById(R.id.tvCurrentLocation)
+
+        val triggerOptions = arrayOf("При входе в зону", "При выходе из зоны")
+        spinnerTrigger.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, triggerOptions)
+
+        vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        createNotificationChannel()
+
+        btnSetAlarm.setOnClickListener { setGeoAlarm() }
+        btnStopAlarm.setOnClickListener { stopGeoAlarm() }
+
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+        etLatitude.setText("55.751244")
+        etLongitude.setText("37.618423")
+
+        checkLocationPermission()
+    }
+
+    private fun setGeoAlarm() {
+        val latText = etLatitude.text.toString()
+        val lonText = etLongitude.text.toString()
+        val radiusText = etRadius.text.toString()
+
+        if (latText.isEmpty() || lonText.isEmpty()) {
+            Toast.makeText(this, "Введите координаты", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        targetLatitude = latText.toDouble()
+        targetLongitude = lonText.toDouble()
+        radius = radiusText.toDoubleOrNull() ?: 100.0
+        triggerType = spinnerTrigger.selectedItemPosition
+
+        isAlarmActive = true
+        wasInside = false
+
+        startLocationUpdates()
+
+        btnSetAlarm.isEnabled = false
+        btnStopAlarm.isEnabled = true
+        tvStatus.text = "Статус: слежение\nЗона: $targetLatitude, $targetLongitude\nРадиус: $radius м"
+
+        Toast.makeText(this, "Гео-будильник установлен!", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun stopGeoAlarm() {
+        isAlarmActive = false
+        locationManager.removeUpdates(this)
+
+        btnSetAlarm.isEnabled = true
+        btnStopAlarm.isEnabled = false
+        tvStatus.text = "Статус: готов"
+
+        Toast.makeText(this, "Слежение остановлено", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun startLocationUpdates() {
+        if (checkLocationPermission()) {
+            locationManager.requestLocationUpdates(
+                LocationManager.GPS_PROVIDER,
+                2000,
+                1f,
+                this
+            )
+        }
+    }
+
+    override fun onLocationChanged(location: Location) {
+        runOnUiThread {
+            tvCurrentLocation.text = String.format(
+                "Текущее местоположение:\n%.4f, %.4f\nТочность: %.1f м",
+                location.latitude, location.longitude, location.accuracy
+            )
+        }
+
+        if (!isAlarmActive) return
+
+        val targetLocation = Location("target").apply {
+            latitude = targetLatitude
+            longitude = targetLongitude
+        }
+
+        val distance = location.distanceTo(targetLocation)
+        val isInside = distance <= radius
+
+        runOnUiThread {
+            val inOut = if (isInside) "ВНУТРИ" else "ВНЕ"
+            tvStatus.text = "Статус: слежение\n$inOut зоны (${String.format("%.1f", distance)} м)"
+        }
+
+        // ЛОГИКА СРАБАТЫВАНИЯ (вход и выход)
+        var shouldTrigger = false
+        when (triggerType) {
+            0 -> if (isInside && !wasInside) shouldTrigger = true  // Вход в зону
+            1 -> if (!isInside && wasInside) shouldTrigger = true // Выход из зоны
+        }
+
+        if (shouldTrigger) {
+            val message = if (triggerType == 0) "ВХОД В ЗОНУ!" else "ВЫХОД ИЗ ЗОНЫ!"
+
+            // ВИБРАЦИЯ (2 секунды)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(VibrationEffect.createOneShot(2000, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(2000)
+                }
+            } catch(e: Exception) { }
+
+            // ЗВУК БУДИЛЬНИКА (6 секунд)
+            try {
+                val player = MediaPlayer.create(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM))
+                player.isLooping = false
+                player.start()
+                handler.postDelayed({
+                    try {
+                        if (player.isPlaying) {
+                            player.stop()
+                            player.release()
+                        }
+                    } catch(e: Exception) { }
+                }, 6000)
+            } catch(e: Exception) { }
+
+            // ВСПЛЫВАЮЩЕЕ СООБЩЕНИЕ
+            runOnUiThread {
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                tvStatus.text = "Статус: СРАБОТАЛ! $message"
+            }
+
+            showNotification("Гео-будильник!", message)
+
+            // Останавливаем слежение после срабатывания
+            stopGeoAlarm()
+        }
+
+        // СОХРАНЯЕМ ТЕКУЩЕЕ СОСТОЯНИЕ ДЛЯ СЛЕДУЮЩЕЙ ПРОВЕРКИ
+        wasInside = isInside
+    }
+
+    private fun showNotification(title: String, message: String) {
+        try {
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle(title)
+                .setContentText(message)
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .build()
+            notificationManager.notify(1, notification)
+        } catch(e: Exception) { }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Гео-будильник",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply { description = "Уведомления о входе/выходе из зоны" }
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+    }
+
+    override fun onProviderDisabled(provider: String) {
+        runOnUiThread {
+            tvCurrentLocation.text = "GPS выключен. Включите GPS в настройках"
+        }
+    }
+
+    override fun onProviderEnabled(provider: String) {
+        runOnUiThread {
+            tvCurrentLocation.text = "GPS включён, ожидание сигнала..."
+        }
+    }
+
+    override fun onStatusChanged(provider: String, status: Int, extras: Bundle) {}
+
+    private fun checkLocationPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestLocationPermission() {
+        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), LOCATION_PERMISSION_CODE)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == LOCATION_PERMISSION_CODE && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Разрешение получено", Toast.LENGTH_SHORT).show()
+            if (isAlarmActive) startLocationUpdates()
+        } else {
+            Toast.makeText(this, "Нужно разрешение для GPS", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (isAlarmActive && checkLocationPermission()) startLocationUpdates()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        locationManager.removeUpdates(this)
+    }
+}
